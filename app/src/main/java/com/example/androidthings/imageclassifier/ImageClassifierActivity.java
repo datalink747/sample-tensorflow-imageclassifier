@@ -36,6 +36,7 @@ import android.widget.Toast;
 
 import com.example.androidthings.imageclassifier.classifier.Classifier;
 import com.example.androidthings.imageclassifier.classifier.TensorFlowImageClassifier;
+import com.example.androidthings.imageclassifier.lcd1602.LiquidCrystalDisplay;
 import com.google.android.things.contrib.driver.button.Button;
 import com.google.android.things.contrib.driver.button.ButtonInputDriver;
 import com.google.android.things.pio.Gpio;
@@ -53,7 +54,7 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
     private static final String TAG = "ImageClassifierActivity";
     private static final int PERMISSIONS_REQUEST = 1;
 
-    private static final String BUTTON_PIN = "BCM21";
+    private static final String BUTTON_PIN = "BCM4";
     private static final String LED_PIN = "BCM6";
 
     private ImagePreprocessor mImagePreprocessor;
@@ -71,6 +72,7 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
     private AtomicBoolean mReady = new AtomicBoolean(false);
     private ButtonInputDriver mButtonDriver;
     private Gpio mReadyLED;
+    private LiquidCrystalDisplay liquidCrystalDisplay;
 
     @Override
     protected void onCreate(final Bundle savedInstanceState) {
@@ -116,8 +118,7 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
             }
         }
         if (mButtonDriver == null) {
-            Log.w(TAG, "Cannot find pin " + BUTTON_PIN + ". Ignoring push button on PIO. " +
-                    "Use a keyboard instead");
+            Log.w(TAG, "Cannot find pin " + BUTTON_PIN + ". Ignoring push button on PIO. " + "Use a keyboard instead");
         }
         if (gpioList.contains(LED_PIN)) {
             try {
@@ -128,38 +129,59 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
                 Log.w(TAG, "Could not open GPIO", e);
             }
         }
+        setupLcd();
+        setLcdReady(true);
         if (mReadyLED == null) {
             Log.w(TAG, "Cannot find pin " + LED_PIN + ". Ignoring ready indicator LED.");
         }
     }
 
+    private static final String GPIO_LCD_RS = "BCM26";
+    private static final String GPIO_LCD_EN = "BCM19";
+
+    private static final String GPIO_LCD_D4 = "BCM21";
+    private static final String GPIO_LCD_D5 = "BCM20";
+    private static final String GPIO_LCD_D6 = "BCM16";
+    private static final String GPIO_LCD_D7 = "BCM12";
+
+    private void setupLcd() {
+        try {
+            liquidCrystalDisplay = new LiquidCrystalDisplay(GPIO_LCD_RS, GPIO_LCD_EN, GPIO_LCD_D4, GPIO_LCD_D5,
+                    GPIO_LCD_D6, GPIO_LCD_D7);
+            liquidCrystalDisplay.begin(16, 2);
+
+            // load characters to the LCD
+
+        } catch (IOException e) {
+            Log.e(TAG, "Error trying to setup LCD", e);
+        }
+
+    }
+
     private Runnable mInitializeOnBackground = new Runnable() {
         @Override
         public void run() {
-            mImagePreprocessor = new ImagePreprocessor(CameraHandler.IMAGE_WIDTH,
-                    CameraHandler.IMAGE_HEIGHT, TensorFlowImageClassifier.INPUT_SIZE);
+            mImagePreprocessor = new ImagePreprocessor(CameraHandler.IMAGE_WIDTH, CameraHandler.IMAGE_HEIGHT,
+                    TensorFlowImageClassifier.INPUT_SIZE);
 
             mTtsSpeaker = new TtsSpeaker();
             mTtsSpeaker.setHasSenseOfHumor(true);
-            mTtsEngine = new TextToSpeech(ImageClassifierActivity.this,
-                    new TextToSpeech.OnInitListener() {
-                        @Override
-                        public void onInit(int status) {
-                            if (status == TextToSpeech.SUCCESS) {
-                                mTtsEngine.setLanguage(Locale.US);
-                                mTtsEngine.setOnUtteranceProgressListener(utteranceListener);
-                                mTtsSpeaker.speakReady(mTtsEngine);
-                            } else {
-                                Log.w(TAG, "Could not open TTS Engine (onInit status=" + status
-                                        + "). Ignoring text to speech");
-                                mTtsEngine = null;
-                            }
-                        }
-                    });
+            mTtsEngine = new TextToSpeech(ImageClassifierActivity.this, new TextToSpeech.OnInitListener() {
+                @Override
+                public void onInit(int status) {
+                    if (status == TextToSpeech.SUCCESS) {
+                        mTtsEngine.setLanguage(Locale.US);
+                        mTtsEngine.setOnUtteranceProgressListener(utteranceListener);
+                        mTtsSpeaker.speakReady(mTtsEngine);
+                    } else {
+                        Log.w(TAG, "Could not open TTS Engine (onInit status=" + status + "). Ignoring text to speech");
+                        mTtsEngine = null;
+                    }
+                }
+            });
             mCameraHandler = CameraHandler.getInstance();
-            mCameraHandler.initializeCamera(
-                    ImageClassifierActivity.this, mBackgroundHandler,
-                    ImageClassifierActivity.this);
+            mCameraHandler
+                    .initializeCamera(ImageClassifierActivity.this, mBackgroundHandler, ImageClassifierActivity.this);
 
             mTensorFlowClassifier = new TensorFlowImageClassifier(ImageClassifierActivity.this);
 
@@ -220,6 +242,23 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
         }
     }
 
+    private void setLcdReady(final boolean ready) {
+        try {
+            liquidCrystalDisplay.clear();
+            if (ready) {
+                liquidCrystalDisplay.print("Ready! ");
+            } else {
+                liquidCrystalDisplay.print("Wait...");
+            }
+            liquidCrystalDisplay.write(',');
+            liquidCrystalDisplay.setCursor(0, 1);
+            liquidCrystalDisplay.print("Android Things!");
+            Log.d(TAG, "finished writing..");
+        } catch (IOException e) {
+            Log.e(TAG, "IOException:", e);
+        }
+    }
+
     @Override
     public void onImageAvailable(ImageReader reader) {
         final Bitmap bitmap;
@@ -237,13 +276,14 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
         final List<Classifier.Recognition> results = mTensorFlowClassifier.recognizeImage(bitmap);
 
         Log.d(TAG, "Got the following results from Tensorflow: " + results);
+        sendResultsToLCD(results);
         if (mTtsEngine != null) {
             // speak out loud the result of the image recognition
             mTtsSpeaker.speakResults(mTtsEngine, results);
         } else {
             // if theres no TTS, we don't need to wait until the utterance is spoken, so we set
             // to ready right away.
-           setReady(true);
+            setReady(true);
         }
 
         runOnUiThread(new Runnable() {
@@ -261,11 +301,32 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
         });
     }
 
+    private void sendResultsToLCD(final List<Classifier.Recognition> results) {
+        if (liquidCrystalDisplay != null) {
+            try {
+                liquidCrystalDisplay.clear();
+                liquidCrystalDisplay.setCursor(0, 0);
+                liquidCrystalDisplay.print("I see ...");
+                liquidCrystalDisplay.setCursor(0, 1);
+                if (results.isEmpty()) {
+                    liquidCrystalDisplay.print("Nothing!?");
+                } else {
+                    liquidCrystalDisplay.print(results.get(0).getTitle());
+                }
+
+            } catch (IOException e) {
+                Log.e(TAG, "Exception writing result:", e);
+            }
+        }
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
         try {
-            if (mBackgroundThread != null) mBackgroundThread.quit();
+            if (mBackgroundThread != null) {
+                mBackgroundThread.quit();
+            }
         } catch (Throwable t) {
             // close quietly
         }
@@ -273,17 +334,23 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
         mBackgroundHandler = null;
 
         try {
-            if (mCameraHandler != null) mCameraHandler.shutDown();
+            if (mCameraHandler != null) {
+                mCameraHandler.shutDown();
+            }
         } catch (Throwable t) {
             // close quietly
         }
         try {
-            if (mTensorFlowClassifier != null) mTensorFlowClassifier.close();
+            if (mTensorFlowClassifier != null) {
+                mTensorFlowClassifier.close();
+            }
         } catch (Throwable t) {
             // close quietly
         }
         try {
-            if (mButtonDriver != null) mButtonDriver.close();
+            if (mButtonDriver != null) {
+                mButtonDriver.close();
+            }
         } catch (Throwable t) {
             // close quietly
         }
@@ -299,12 +366,10 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
     // regular Android device.
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String permissions[],
-            @NonNull int[] grantResults) {
+                                           @NonNull int[] grantResults) {
         switch (requestCode) {
             case PERMISSIONS_REQUEST: {
-                if (grantResults.length > 0
-                        && grantResults[0] == PackageManager.PERMISSION_GRANTED
-                        && grantResults[1] == PackageManager.PERMISSION_GRANTED) {
+                if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED && grantResults[1] == PackageManager.PERMISSION_GRANTED) {
                     init();
                 } else {
                     requestPermission();
@@ -317,16 +382,16 @@ public class ImageClassifierActivity extends Activity implements ImageReader.OnI
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;
         }
-        return checkSelfPermission(CAMERA) == PackageManager.PERMISSION_GRANTED
-                && checkSelfPermission(WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        return checkSelfPermission(CAMERA) == PackageManager.PERMISSION_GRANTED && checkSelfPermission(
+                WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void requestPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (shouldShowRequestPermissionRationale(CAMERA) ||
-                    shouldShowRequestPermissionRationale(WRITE_EXTERNAL_STORAGE)) {
-                Toast.makeText(this, "Camera AND storage permission are required for this demo",
-                        Toast.LENGTH_LONG).show();
+            if (shouldShowRequestPermissionRationale(CAMERA) || shouldShowRequestPermissionRationale(
+                    WRITE_EXTERNAL_STORAGE)) {
+                Toast.makeText(this, "Camera AND storage permission are required for this demo", Toast.LENGTH_LONG)
+                        .show();
             }
             requestPermissions(new String[]{CAMERA, WRITE_EXTERNAL_STORAGE}, PERMISSIONS_REQUEST);
         }
